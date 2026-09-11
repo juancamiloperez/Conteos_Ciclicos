@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Escanear código de barras</title>
+<!--
+  Página independiente de escaneo de código de barras con la cámara,
+  para la app "Conteos Cíclicos" (agregada 2026-09-10, ronda 7).
+
+  POR QUÉ EXISTE ESTA PÁGINA APARTE: la app principal corre dentro de
+  Google Apps Script, que sirve las web apps envueltas en un iframe
+  propio de Google. Ese iframe no delega el permiso de cámara del
+  navegador al contenido de adentro, así que pedir la cámara desde
+  dentro de la app de Apps Script falla siempre con NotAllowedError,
+  sin llegar siquiera a mostrar el aviso de permiso. Esta página, al
+  vivir en su propio dominio (fuera de Apps Script), no tiene ese
+  problema: el navegador pide el permiso de cámara normalmente.
+
+  CÓMO SE USA: la app principal manda al usuario aquí con
+  "?volver=<URL_DE_LA_APP>" en el enlace. Esta página escanea con la
+  cámara trasera del celular y, en cuanto detecta un código, redirige
+  de vuelta a esa URL agregando "&buscar=<CODIGO>" (o "?buscar=" si
+  la URL de vuelta no traía parámetros). Ver README.md del paquete
+  principal, sección "Escanear con la cámara", para las instrucciones
+  de dónde publicar este archivo (ej. GitHub Pages, gratis).
+
+  No guarda ni envía datos a ningún lado propio: solo lee la cámara
+  en el navegador del celular y hace una redirección. No necesita
+  backend ni base de datos.
+-->
+<style>
+  :root {
+    --bg: #f4f6f8; --card: #ffffff; --text: #1f2933; --muted: #65748b;
+    --primary: #2563eb; --primary-dark: #1d4ed8; --danger: #dc2626; --danger-bg: #fee2e2;
+    --border: #e2e8f0;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; background: var(--bg); color: var(--text);
+    font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    display: flex; align-items: center; justify-content: center; padding: 16px;
+  }
+  .card {
+    background: var(--card); border: 1px solid var(--border); border-radius: 14px;
+    padding: 20px; max-width: 480px; width: 100%;
+  }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  p { font-size: 13px; color: var(--muted); line-height: 1.5; }
+  #lector {
+    width: 100%; border-radius: 10px; overflow: hidden; background: #000;
+    min-height: 220px; margin: 14px 0;
+  }
+  #lector video { width: 100% !important; border-radius: 10px; }
+  .btn {
+    display: block; width: 100%; padding: 12px; border-radius: 10px; border: 1px solid var(--border);
+    background: var(--card); color: var(--text); font-size: 15px; cursor: pointer; margin-top: 8px;
+  }
+  .btn-primary { background: var(--primary); color: #fff; border-color: var(--primary); }
+  .msg-error {
+    background: var(--danger-bg); color: var(--danger); border-radius: 8px;
+    padding: 10px 12px; font-size: 13px; margin-top: 12px; display: none;
+  }
+  .estado { font-size: 13px; color: var(--muted); margin-top: 10px; text-align: center; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>📷 Escanear código de barras</h1>
+    <p id="txtAyuda">Apunta la cámara trasera al código de barras. En cuanto lo detecte, vas a
+      volver solo a la aplicación con el código ya cargado.</p>
+    <div id="lector"></div>
+    <p id="estado" class="estado"></p>
+    <p id="errBox" class="msg-error"></p>
+    <button id="btnVolver" class="btn" style="display:none;">← Volver sin escanear</button>
+  </div>
+
+<script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script>
+(function () {
+  var params = new URLSearchParams(location.search);
+  var volver = params.get('volver');
+  var errBox = document.getElementById('errBox');
+  var estadoBox = document.getElementById('estado');
+  var btnVolver = document.getElementById('btnVolver');
+
+  function mostrarError(msg) {
+    errBox.textContent = msg;
+    errBox.style.display = 'block';
+  }
+
+  if (!volver) {
+    mostrarError('Falta el parámetro "volver" en la URL — esta página se abre desde el botón ' +
+        '"Escanear con la cámara" de la app de Conteos Cíclicos, no se usa sola.');
+    return;
+  }
+
+  btnVolver.style.display = 'block';
+  btnVolver.onclick = function () { location.href = volver; };
+
+  function volverConCodigo(codigo) {
+    var sep = volver.indexOf('?') > -1 ? '&' : '?';
+    location.href = volver + sep + 'buscar=' + encodeURIComponent(codigo);
+  }
+
+  if (typeof Html5Qrcode === 'undefined') {
+    mostrarError('No se pudo cargar el lector de cámara (revisa la conexión a internet del celular e intenta de nuevo).');
+    return;
+  }
+
+  var scanner;
+  try {
+    scanner = new Html5Qrcode('lector', {
+      formatsToSupport: [
+        Html5QrcodeSupportedFormats.EAN_13, Html5QrcodeSupportedFormats.EAN_8,
+        Html5QrcodeSupportedFormats.UPC_A, Html5QrcodeSupportedFormats.UPC_E,
+        Html5QrcodeSupportedFormats.CODE_128, Html5QrcodeSupportedFormats.CODE_39
+      ],
+      verbose: false
+    });
+    estadoBox.textContent = 'Activando cámara...';
+    scanner.start(
+      { facingMode: 'environment' },
+      { fps: 10, qrbox: { width: 260, height: 140 } },
+      function (decodedText) {
+        estadoBox.textContent = 'Código detectado: ' + decodedText + ' — volviendo...';
+        scanner.stop().then(function () {
+          scanner.clear();
+          volverConCodigo(decodedText);
+        }).catch(function () { volverConCodigo(decodedText); });
+      },
+      function () { /* no se pudo leer en este frame en particular: normal, se ignora */ }
+    ).then(function () {
+      estadoBox.textContent = 'Cámara activa. Apunta al código de barras.';
+    }).catch(function (err) {
+      var detalle = (err && err.message) ? err.message : String(err);
+      mostrarError('No se pudo activar la cámara (' + detalle + '). Revisa que le hayas dado ' +
+          'permiso de cámara a este sitio en la configuración de tu navegador, y vuelve a intentar ' +
+          'recargando esta página.');
+      estadoBox.textContent = '';
+    });
+  } catch (err) {
+    mostrarError('No se pudo iniciar el lector de cámara: ' + (err && err.message ? err.message : err));
+  }
+})();
+</script>
+</body>
+</html>
