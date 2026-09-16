@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Escanear código de barras</title>
+<!--
+  Página independiente de escaneo de código de barras con la cámara,
+  para la app "Conteos Cíclicos" (agregada 2026-09-10, ronda 7).
+
+  POR QUÉ EXISTE ESTA PÁGINA APARTE: la app principal corre dentro de
+  Google Apps Script, que sirve las web apps envueltas en un iframe
+  propio de Google. Ese iframe no delega el permiso de cámara del
+  navegador al contenido de adentro, así que pedir la cámara desde
+  dentro de la app de Apps Script falla siempre con NotAllowedError,
+  sin llegar siquiera a mostrar el aviso de permiso. Esta página, al
+  vivir en su propio dominio (fuera de Apps Script), no tiene ese
+  problema: el navegador pide el permiso de cámara normalmente.
+
+  CÓMO SE USA: la app principal manda al usuario aquí con
+  "?volver=<URL_DE_LA_APP>" en el enlace. Esta página escanea con la
+  cámara trasera del celular y, en cuanto detecta un código, redirige
+  de vuelta a esa URL agregando "&buscar=<CODIGO>" (o "?buscar=" si
+  la URL de vuelta no traía parámetros). Ver README.md del paquete
+  principal, sección "Escanear con la cámara", para las instrucciones
+  de dónde publicar este archivo (ej. GitHub Pages, gratis).
+
+  MODO DE PRUEBA: si se abre esta página SIN "?volver=" (por ejemplo,
+  pegando la URL publicada directamente en el navegador del celular,
+  para probar si la cámara funciona antes de conectarla con la app),
+  igual activa la cámara y muestra el código detectado en pantalla en
+  vez de redirigir a ningún lado. Así se puede confirmar que el
+  permiso de cámara funciona en este dominio sin depender de la app.
+
+  No guarda ni envía datos a ningún lado propio: solo lee la cámara
+  en el navegador del celular y hace una redirección (o muestra el
+  resultado en pantalla, en modo de prueba). No necesita backend ni
+  base de datos.
+-->
+<style>
+  .banner {
+    background: #eff6ff; color: #1e40af; border: 1px solid #bfdbfe; border-radius: 8px;
+    padding: 10px 12px; font-size: 13px; margin-bottom: 12px; display: none;
+  }
+  .resultado {
+    background: #f0fdf4; color: #166534; border: 1px solid #bbf7d0; border-radius: 8px;
+    padding: 12px; font-size: 15px; font-weight: 600; margin-top: 12px; display: none; word-break: break-all;
+  }
+  :root {
+    --bg: #f4f6f8; --card: #ffffff; --text: #1f2933; --muted: #65748b;
+    --primary: #2563eb; --primary-dark: #1d4ed8; --danger: #dc2626; --danger-bg: #fee2e2;
+    --border: #e2e8f0;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; background: var(--bg); color: var(--text);
+    font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    display: flex; align-items: center; justify-content: center; padding: 16px;
+  }
+  .card {
+    background: var(--card); border: 1px solid var(--border); border-radius: 14px;
+    padding: 20px; max-width: 480px; width: 100%;
+  }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  p { font-size: 13px; color: var(--muted); line-height: 1.5; }
+  #lector {
+    width: 100%; border-radius: 10px; overflow: hidden; background: #000;
+    min-height: 220px; margin: 14px 0;
+  }
+  #lector video { width: 100% !important; border-radius: 10px; }
+  .btn {
+    display: block; width: 100%; padding: 12px; border-radius: 10px; border: 1px solid var(--border);
+    background: var(--card); color: var(--text); font-size: 15px; cursor: pointer; margin-top: 8px;
+  }
+  .btn-primary { background: var(--primary); color: #fff; border-color: var(--primary); }
+  .msg-error {
+    background: var(--danger-bg); color: var(--danger); border-radius: 8px;
+    padding: 10px 12px; font-size: 13px; margin-top: 12px; display: none;
+  }
+  .estado { font-size: 13px; color: var(--muted); margin-top: 10px; text-align: center; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>📷 Escanear código de barras</h1>
+    <p id="bannerPrueba" class="banner">
+      Estás en <b>modo de prueba</b> (no viniste desde la app de Conteos Cíclicos). Si la cámara
+      pide permiso y detecta un código aquí abajo, todo está funcionando bien — luego usa el botón
+      de la app para el flujo normal.
+    </p>
+    <p id="txtAyuda">Apunta la cámara trasera al código de barras. En cuanto lo detecte, vas a
+      volver solo a la aplicación con el código ya cargado.</p>
+    <div id="lector"></div>
+    <p id="estado" class="estado"></p>
+    <p id="errBox" class="msg-error"></p>
+    <p id="resultado" class="resultado"></p>
+    <button id="btnOtro" class="btn" style="display:none;">↻ Escanear otro código</button>
+    <button id="btnVolver" class="btn" style="display:none;">← Volver sin escanear</button>
+  </div>
+
+<script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script>
+(function () {
+  var params = new URLSearchParams(location.search);
+  var volver = params.get('volver');
+  var modoPrueba = !volver;
+
+  var errBox = document.getElementById('errBox');
+  var estadoBox = document.getElementById('estado');
+  var resultadoBox = document.getElementById('resultado');
+  var btnVolver = document.getElementById('btnVolver');
+  var btnOtro = document.getElementById('btnOtro');
+  var bannerPrueba = document.getElementById('bannerPrueba');
+
+  function mostrarError(msg) {
+    errBox.textContent = msg;
+    errBox.style.display = 'block';
+  }
+
+  if (modoPrueba) {
+    // Sin "volver": modo de prueba — igual activa la cámara, pero al
+    // detectar un código lo muestra en pantalla en vez de redirigir.
+    bannerPrueba.style.display = 'block';
+    document.getElementById('txtAyuda').style.display = 'none';
+  } else {
+    btnVolver.style.display = 'block';
+    btnVolver.onclick = function () { location.href = volver; };
+  }
+
+  function volverConCodigo(codigo) {
+    var sep = volver.indexOf('?') > -1 ? '&' : '?';
+    location.href = volver + sep + 'buscar=' + encodeURIComponent(codigo);
+  }
+
+  function mostrarResultadoPrueba(codigo) {
+    resultadoBox.textContent = '✅ Código leído: ' + codigo;
+    resultadoBox.style.display = 'block';
+    btnOtro.style.display = 'block';
+  }
+
+  if (typeof Html5Qrcode === 'undefined') {
+    mostrarError('No se pudo cargar el lector de cámara (revisa la conexión a internet del celular e intenta de nuevo).');
+    return;
+  }
+
+  var scanner;
+
+  function iniciarCamara() {
+    resultadoBox.style.display = 'none';
+    btnOtro.style.display = 'none';
+    errBox.style.display = 'none';
+    try {
+      scanner = new Html5Qrcode('lector', {
+        formatsToSupport: [
+          Html5QrcodeSupportedFormats.QR_CODE,
+          Html5QrcodeSupportedFormats.EAN_13, Html5QrcodeSupportedFormats.EAN_8,
+          Html5QrcodeSupportedFormats.UPC_A, Html5QrcodeSupportedFormats.UPC_E,
+          Html5QrcodeSupportedFormats.CODE_128, Html5QrcodeSupportedFormats.CODE_39
+        ],
+        verbose: false
+      });
+      estadoBox.textContent = 'Activando cámara...';
+      scanner.start(
+        // Pedimos explícitamente una resolución alta de video. Sin esto, algunos
+        // navegadores (Safari/iPhone incluido) entregan un video de baja
+        // resolución a getUserMedia, y con pocos píxeles por línea del código de
+        // barras el decodificador no logra distinguir las barras finas —
+        // aunque a simple vista la imagen se vea nítida en pantalla. "ideal" es
+        // una preferencia, no una exigencia: si el celular no da esa resolución,
+        // usa la más alta que sí pueda dar, no falla.
+        { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } },
+        {
+          fps: 10,
+          // Recuadro de escaneo más grande y proporcional al tamaño real del
+          // video (antes era un tamaño fijo en píxeles) — deja más margen para
+          // encuadrar códigos de barras largos sin cortarlos en los bordes.
+          qrbox: function (viewfinderWidth, viewfinderHeight) {
+            return {
+              width: Math.floor(viewfinderWidth * 0.85),
+              height: Math.floor(viewfinderHeight * 0.4)
+            };
+          },
+          // Si el navegador del celular trae detector nativo de códigos de barras
+          // (API "Shape Detection" — disponible en varios Android/Chrome; Safari
+          // en iPhone NO la soporta hasta donde se pudo confirmar), lo usa en vez
+          // del lector en JavaScript. Si el navegador no lo trae, sigue
+          // funcionando igual (respaldo automático al lector en JavaScript).
+          experimentalFeatures: { useBarCodeDetectorIfSupported: true }
+        },
+        function (decodedText) {
+          estadoBox.textContent = modoPrueba ? 'Código detectado.' : ('Código detectado: ' + decodedText + ' — volviendo...');
+          scanner.stop().then(function () {
+            scanner.clear();
+            if (modoPrueba) { mostrarResultadoPrueba(decodedText); } else { volverConCodigo(decodedText); }
+          }).catch(function () {
+            if (modoPrueba) { mostrarResultadoPrueba(decodedText); } else { volverConCodigo(decodedText); }
+          });
+        },
+        function () { /* no se pudo leer en este frame en particular: normal, se ignora */ }
+      ).then(function () {
+        estadoBox.textContent = 'Cámara activa. Apunta al código de barras.';
+      }).catch(function (err) {
+        var detalle = (err && err.message) ? err.message : String(err);
+        mostrarError('No se pudo activar la cámara (' + detalle + '). Revisa que le hayas dado ' +
+            'permiso de cámara a este sitio en la configuración de tu navegador, y vuelve a intentar ' +
+            'recargando esta página.');
+        estadoBox.textContent = '';
+      });
+    } catch (err) {
+      mostrarError('No se pudo iniciar el lector de cámara: ' + (err && err.message ? err.message : err));
+    }
+  }
+
+  btnOtro.onclick = iniciarCamara;
+  iniciarCamara();
+})();
+</script>
+</body>
+</html>
